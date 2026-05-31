@@ -170,26 +170,34 @@ function editTool(): ToolDefinition {
   };
 }
 
+function matchGlob(pattern: string, name: string): boolean {
+  let regexStr = pattern
+    .replace(/\./g, "\\.")
+    .replace(/\*\*\//g, "(.+/)?")
+    .replace(/\*/g, "[^/]*");
+  regexStr = "^" + regexStr + "$";
+  return new RegExp(regexStr).test(name);
+}
+
 function simpleGlob(pattern: string, basePath: string): string[] {
   const results: string[] = [];
-  const isRecursive = pattern.startsWith("**/");
-  const actualPattern = isRecursive ? pattern.slice(3) : pattern;
-  const extMatch = actualPattern.includes("*") ? new RegExp("^" + actualPattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$") : null;
+  const segments = pattern.split("/");
+  const hasRecursive = segments.includes("**");
 
-  function walk(dir: string, recursive: boolean): void {
+  function walk(dir: string, depth: number): void {
     try {
       const entries = readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
+        if (entry.name.startsWith(".") && !pattern.startsWith(".")) continue;
         const fullPath = join(dir, entry.name);
         const relPath = relative(basePath, fullPath);
+
         if (entry.isDirectory()) {
-          if (recursive) walk(fullPath, true);
+          if (hasRecursive || depth < segments.length) {
+            walk(fullPath, depth + 1);
+          }
         } else if (entry.isFile()) {
-          if (extMatch) {
-            if (extMatch.test(entry.name)) results.push(relPath);
-          } else if (!actualPattern.includes("*")) {
-            if (relPath === actualPattern || relPath.endsWith("/" + actualPattern)) results.push(relPath);
-          } else {
+          if (matchGlob(pattern, relPath)) {
             results.push(relPath);
           }
         }
@@ -197,7 +205,7 @@ function simpleGlob(pattern: string, basePath: string): string[] {
     } catch {}
   }
 
-  walk(basePath, isRecursive || pattern.includes("**"));
+  walk(basePath, 0);
   return results.sort();
 }
 

@@ -95,10 +95,13 @@ export class AgentRunner {
 
     let turnCount = 0;
     const maxTurns = 25;
+    let toolRoundsWithoutText = 0;
+    const maxToolRounds = 5;
 
     while (turnCount < maxTurns) {
       turnCount++;
       let fullResponse = "";
+      const streamToolCalls: ToolCall[] = [];
 
       const stream = this.provider.chat(this.messages, this.tools);
 
@@ -110,7 +113,7 @@ export class AgentRunner {
             break;
 
           case "tool-call":
-            yield `\n[Tool: ${chunk.toolCall.function.name}] `;
+            streamToolCalls.push(chunk.toolCall);
             break;
 
           case "error":
@@ -122,20 +125,30 @@ export class AgentRunner {
         }
       }
 
-      if (fullResponse) {
-        this.messages.push({ role: "assistant", content: fullResponse });
+      let toolCalls: ToolCall[] = [];
+
+      if (streamToolCalls.length > 0) {
+        toolCalls = streamToolCalls;
       }
 
-      const lastAssistant = this.messages
-        .slice()
-        .reverse()
-        .find((m) => m.role === "assistant" && m.content);
-
-      if (!lastAssistant) break;
-
-      const toolCalls = this.extractToolCalls(lastAssistant.content);
+      {
+        const msg: LLMMessage = { role: "assistant", content: fullResponse || "" };
+        if (toolCalls.length > 0) {
+          msg.tool_calls = toolCalls;
+          toolRoundsWithoutText = 0;
+        }
+        this.messages.push(msg);
+        if (!fullResponse && toolCalls.length === 0) {
+          toolRoundsWithoutText++;
+        }
+      }
 
       if (toolCalls.length === 0) break;
+
+      if (toolRoundsWithoutText > maxToolRounds) {
+        yield `\n[Límite de rondas de herramientas alcanzado. Resumiendo...]\n`;
+        break;
+      }
 
       for (const tc of toolCalls) {
         const tool = this.toolMap.get(tc.function.name);
@@ -162,18 +175,20 @@ export class AgentRunner {
         try {
           const args = JSON.parse(tc.function.arguments);
           const result = await tool.execute(args);
-
+          const resultContent = result.success ? result.output : `ERROR: ${result.error}`;
           this.messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: result.success ? result.output : `ERROR: ${result.error}`,
+            content: resultContent,
             name: tc.function.name,
           });
         } catch (err) {
+          const errMsg = `Error executing ${tc.function.name}: ${String(err)}`;
+          console.error(`\n[DEBUG Tool Error: ${errMsg}]\n`);
           this.messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: `Error executing ${tc.function.name}: ${String(err)}`,
+            content: errMsg,
             name: tc.function.name,
           });
         }

@@ -48,110 +48,115 @@ function createOpenAIProvider(model: string, config?: { baseURL?: string; apiKey
 
   const url = `${baseURL.replace(/\/$/, "")}/chat/completions`;
 
+  function formatMessages(messages: LLMMessage[]): Record<string, unknown>[] {
+    return messages.map((m) => {
+      if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+        return {
+          role: "assistant",
+          content: m.content || null,
+          tool_calls: m.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: { name: tc.function.name, arguments: tc.function.arguments },
+          })),
+        };
+      }
+      if (m.role === "tool") {
+        const r: Record<string, unknown> = { role: "tool", tool_call_id: m.tool_call_id, content: m.content };
+        if (m.name) r.name = m.name;
+        return r;
+      }
+      return { role: m.role, content: m.content };
+    });
+  }
+
+  function buildToolsPayload(tools: ToolDefinition[]): Record<string, unknown>[] {
+    return tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+  }
+
+  function getHeaders(): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      ...(config?.baseURL?.includes("kilo") ? {
+        "User-Agent": "Mozilla/5.0",
+        "x-kilo-client": "vscode",
+      } : {}),
+    };
+  }
+
   async function* chat(messages: LLMMessage[], tools: ToolDefinition[]): AsyncGenerator<LLMChunk> {
+    const formattedMessages = formatMessages(messages);
+
     const body: Record<string, unknown> = {
       model,
-      messages: messages.map(({ tool_calls, ...m }) => m),
-      stream: true,
+      messages: formattedMessages,
+      stream: false,
       max_tokens: 16384,
     };
 
     if (tools.length > 0) {
-      body.tools = tools.map((t) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      }));
+      body.tools = buildToolsPayload(tools);
       body.tool_choice = "auto";
     }
 
     try {
       const response = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          ...(config?.baseURL?.includes("kilo") ? {
-            "User-Agent": "Mozilla/5.0",
-            "x-kilo-client": "vscode",
-          } : {}),
-        },
+        headers: getHeaders(),
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(120000),
       });
 
       if (!response.ok) {
         const err = await response.text().catch(() => "Unknown error");
+        console.error(`[DEBUG API Error] ${response.status}: ${err}\n`);
         yield { type: "error", message: `API error ${response.status}: ${err}` };
         yield { type: "done" };
         return;
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        yield { type: "error", message: "No response body" };
+      const data = await response.json() as {
+        choices?: Array<{
+          message?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              id: string;
+              type: string;
+              function: { name: string; arguments: string };
+            }>;
+          };
+          finish_reason?: string;
+        }>;
+      };
+
+      const choice = data.choices?.[0];
+      if (!choice) {
+        yield { type: "error", message: "No choices in response" };
         yield { type: "done" };
         return;
       }
 
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let currentToolCall: ToolCall | null = null;
+      const msg = choice.message;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data: ")) continue;
-          const data = trimmed.slice(6);
-          if (data === "[DONE]") continue;
-
-          try {
-            const chunk = JSON.parse(data);
-            const delta = chunk.choices?.[0]?.delta;
-            if (!delta) continue;
-
-            if (delta.content) {
-              if (currentToolCall) {
-                yield { type: "tool-call", toolCall: currentToolCall };
-                currentToolCall = null;
-              }
-              yield { type: "text", content: delta.content };
-            }
-
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                if (!currentToolCall || currentToolCall.id !== tc.id) {
-                  if (currentToolCall) {
-                    yield { type: "tool-call", toolCall: currentToolCall };
-                  }
-                  currentToolCall = {
-                    id: tc.id,
-                    type: "function",
-                    function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" },
-                  };
-                } else {
-                  currentToolCall.function.arguments += tc.function?.arguments || "";
-                }
-              }
-            }
-          } catch {
-            // skip malformed JSON
-          }
-        }
+      if (msg?.content) {
+        yield { type: "text", content: msg.content };
       }
 
-      if (currentToolCall) {
-        yield { type: "tool-call", toolCall: currentToolCall };
+      if (msg?.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          yield {
+            type: "tool-call",
+            toolCall: {
+              id: tc.id,
+              type: "function",
+              function: { name: tc.function.name, arguments: tc.function.arguments },
+            },
+          };
+        }
       }
 
       yield { type: "done" };
