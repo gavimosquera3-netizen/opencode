@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { startInteractiveChat, runOneShot } from "./chat.js";
+import { startUI } from "./server.js";
 import { loadConfig } from "./config.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
@@ -47,6 +48,19 @@ export function createCLI(): Command {
       }
       const input = readFileSync(file, "utf-8");
       await runOneShot(input, opts.model);
+    });
+
+  program
+    .command("ui")
+    .alias("u")
+    .description("Inicia la interfaz web visual en un navegador")
+    .option("-p, --port <number>", "Puerto del servidor web", "3000")
+    .option("-m, --model <model>", "Modelo LLM a usar")
+    .option("--config <path>", "Ruta al archivo de configuración")
+    .action(async (opts) => {
+      if (opts.config) loadConfig(opts.config);
+      const port = parseInt(opts.port, 10);
+      await startUI(port, opts.model);
     });
 
   program
