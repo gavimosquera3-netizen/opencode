@@ -1,0 +1,23 @@
+{
+  "name": "opencode-advanced",
+  "version": "0.1.0",
+  "description": "CLI de IA avanzado para ingeniería de software - alternativa a opencode con más capacidades",
+  "type": "module",
+  "bin": {
+    "opencode-advanced": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.14.0"
+  }
+}
